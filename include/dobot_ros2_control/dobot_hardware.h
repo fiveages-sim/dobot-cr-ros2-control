@@ -18,7 +18,6 @@
 #include <hardware_interface/types/hardware_interface_return_values.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
-
 #include "dobot_ros2_control/command.h"
 
 #include <memory>
@@ -98,9 +97,11 @@ private:
     double gripper_position_command_;              // 夹爪位置命令（0.0-1.0）
     double last_gripper_command_;                  // 上次发送的夹爪命令（用于检测变化）
     int gripper_read_counter_;                     // 夹爪读取计数器（用于降低读取频率）
+    int gripper_read_frequency_divider_;           // 夹爪读取频率除数（每N次read循环读取一次，默认4）
     bool has_gripper_;                             // 是否配置了夹爪
     std::string gripper_joint_name_;               // 夹爪关节名称
     int gripper_joint_index_;                      // 夹爪在关节列表中的索引（-1表示无夹爪）
+    bool has_ft_sensor_;                           // 是否配置了力传感器
 
     // 配置参数
     std::string robot_ip_;    // 机器人IP地址
@@ -117,10 +118,21 @@ private:
     int write_count_;
     std::chrono::steady_clock::time_point last_write_stat_time_;
     
+    // 六维力传感器数据（用于 hardware interface 导出）
+    double ft_sensor_force_x_;   // 力 X (N)
+    double ft_sensor_force_y_;   // 力 Y (N)
+    double ft_sensor_force_z_;   // 力 Z (N)
+    double ft_sensor_torque_x_;  // 力矩 X (N·m)
+    double ft_sensor_torque_y_;  // 力矩 Y (N·m)
+    double ft_sensor_torque_z_;  // 力矩 Z (N·m)
+    
     // 夹爪控制辅助函数
     bool initializeModbus();
     bool controlGripper(double position);  // position: 0.0(闭合) - 1.0(打开)
     bool readGripperState(double &position);
+    
+    // 传感器辅助函数
+    bool findSensorByName(const std::string& sensor_name, hardware_interface::ComponentInfo& sensor_info);
 };
 
 } // namespace dobot_ros2_control
