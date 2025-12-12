@@ -1,4 +1,4 @@
-// Copyright 2024 Dobot Team
+// Copyright 2024 FiveAges Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +19,13 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
 #include "dobot_ros2_control/command.h"
+#include "dobot_ros2_control/grippers/dobot_gripper_interface.h"
 
 #include <memory>
 #include <string>
 #include <vector>
 #include <atomic>
+#include <unordered_map>
 
 namespace dobot_ros2_control {
 
@@ -92,15 +94,10 @@ private:
     std::vector<double> joint_position_commands_;  // 关节位置命令（弧度）
     std::vector<std::string> joint_names_;         // 关节名称列表
     
-    // 夹爪数据存储
-    double gripper_position_;                      // 夹爪位置（0.0=闭合, 1.0=打开）
-    double gripper_position_command_;              // 夹爪位置命令（0.0-1.0）
-    double last_gripper_command_;                  // 上次发送的夹爪命令（用于检测变化）
-    int gripper_read_counter_;                     // 夹爪读取计数器（用于降低读取频率）
-    int gripper_read_frequency_divider_;           // 夹爪读取频率除数（每N次read循环读取一次，默认4）
-    bool has_gripper_;                             // 是否配置了夹爪
-    std::string gripper_joint_name_;               // 夹爪关节名称
-    int gripper_joint_index_;                      // 夹爪在关节列表中的索引（-1表示无夹爪）
+    // 夹爪接口（支持多种夹爪类型）
+    std::unique_ptr<DobotGripperInterface> gripper_;  // 夹爪接口指针
+    bool has_gripper_;                               // 是否配置了夹爪
+    int gripper_joint_index_;                        // 夹爪在关节列表中的索引（-1表示无夹爪）
     bool has_ft_sensor_;                           // 是否配置了力传感器
 
     // 配置参数
@@ -126,10 +123,13 @@ private:
     double ft_sensor_torque_y_;  // 力矩 Y (N·m)
     double ft_sensor_torque_z_;  // 力矩 Z (N·m)
     
-    // 夹爪控制辅助函数
-    bool initializeModbus();
-    bool controlGripper(double position);  // position: 0.0(闭合) - 1.0(打开)
-    bool readGripperState(double &position);
+    // 夹爪工厂方法
+    std::unique_ptr<DobotGripperInterface> createGripper(
+        const std::string& gripper_type,
+        const std::string& joint_name,
+        rclcpp::Logger logger,
+        const std::unordered_map<std::string, std::string>& params
+    );
     
     // 传感器辅助函数
     bool findSensorByName(const std::string& sensor_name, hardware_interface::ComponentInfo& sensor_info);

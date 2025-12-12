@@ -1,4 +1,4 @@
-// Copyright 2024 Dobot Team
+// Copyright 2024 FiveAges Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,23 +13,24 @@
 // limitations under the License.
 
 #include "dobot_ros2_control/dobot_hardware.h"
+#include "dobot_ros2_control/grippers/changingtek_gripper.h"
 #include <pluginlib/class_list_macros.hpp>
 #include <algorithm>
 #include <map>
+#include <unordered_map>
 
-namespace dobot_ros2_control {
+namespace dobot_ros2_control
+{
     hardware_interface::CallbackReturn DobotHardware::on_init(
-        const hardware_interface::HardwareComponentInterfaceParams &params) {
-        if (SystemInterface::on_init(params) != hardware_interface::CallbackReturn::SUCCESS) {
+        const hardware_interface::HardwareComponentInterfaceParams& params)
+    {
+        if (SystemInterface::on_init(params) != hardware_interface::CallbackReturn::SUCCESS)
+        {
             return hardware_interface::CallbackReturn::ERROR;
         }
 
-        // 初始化夹爪数据
-        gripper_position_ = 0.0;
-        gripper_position_command_ = 0.0;
-        last_gripper_command_ = 0.0;
-        gripper_read_counter_ = 0;
-        gripper_read_frequency_divider_ = 4; // 默认值，将在参数读取时覆盖
+        // 初始化夹爪
+        gripper_.reset();
         has_gripper_ = false;
         gripper_joint_index_ = -1;
 
@@ -38,21 +39,24 @@ namespace dobot_ros2_control {
 
         // 解析 URDF 配置的关节（使用基类成员变量 info_）
         int joint_index = 0;
-        for (const auto &joint: info_.joints) {
+        for (const auto& joint : info_.joints)
+        {
             // 检查关节名称中是否包含 gripper 或 hand
             std::string joint_name_lower = joint.name;
             std::transform(joint_name_lower.begin(), joint_name_lower.end(),
                            joint_name_lower.begin(), ::tolower);
 
             if (joint_name_lower.find("gripper") != std::string::npos ||
-                joint_name_lower.find("hand") != std::string::npos) {
+                joint_name_lower.find("hand") != std::string::npos)
+            {
                 // 这是夹爪关节
                 has_gripper_ = true;
-                gripper_joint_name_ = joint.name;
                 gripper_joint_index_ = joint_index;
                 RCLCPP_INFO(get_node()->get_logger(), "Detected gripper joint: %s (index %d)",
-                            gripper_joint_name_.c_str(), gripper_joint_index_);
-            } else {
+                            joint.name.c_str(), gripper_joint_index_);
+            }
+            else
+            {
                 // 这是机械臂关节
                 joint_names_.push_back(joint.name);
             }
@@ -67,21 +71,21 @@ namespace dobot_ros2_control {
         joint_position_commands_.resize(arm_joint_count, 0.0);
 
         RCLCPP_INFO(get_node()->get_logger(), "Found %d arm joints in configuration", arm_joint_count);
-        if (has_gripper_) {
-            RCLCPP_INFO(get_node()->get_logger(), "Found gripper: %s", gripper_joint_name_.c_str());
-        }
 
         // 检测力传感器配置
         hardware_interface::ComponentInfo ft_sensor_info;
         has_ft_sensor_ = findSensorByName("ft_sensor", ft_sensor_info);
-        if (has_ft_sensor_) {
+        if (has_ft_sensor_)
+        {
             RCLCPP_INFO(get_node()->get_logger(), "Found ft_sensor: %s", ft_sensor_info.name.c_str());
         }
 
         // 读取配置参数的辅助函数（使用基类成员变量 info_）
         const auto get_hardware_parameter = [this
-                ](const std::string &parameter_name, const std::string &default_value) {
-            if (auto it = info_.hardware_parameters.find(parameter_name); it != info_.hardware_parameters.end()) {
+            ](const std::string& parameter_name, const std::string& default_value)
+        {
+            if (auto it = info_.hardware_parameters.find(parameter_name); it != info_.hardware_parameters.end())
+            {
                 return it->second;
             }
             return default_value;
@@ -95,9 +99,36 @@ namespace dobot_ros2_control {
         speed_factor_ = std::stoi(get_hardware_parameter("speed_factor", "5"));
         verbose_ = get_hardware_parameter("verbose", "false") == "true";
 
-        // 夹爪读取频率参数
-        gripper_read_frequency_divider_ = std::stoi(get_hardware_parameter("gripper_read_frequency_divider", "4"));
-        // 默认每4次read循环读取一次
+        // 如果检测到夹爪，创建夹爪对象
+        if (has_gripper_)
+        {
+            std::string gripper_joint_name;
+            for (const auto& joint : info_.joints)
+            {
+                std::string joint_name_lower = joint.name;
+                std::transform(joint_name_lower.begin(), joint_name_lower.end(),
+                               joint_name_lower.begin(), ::tolower);
+                if (joint_name_lower.find("gripper") != std::string::npos ||
+                    joint_name_lower.find("hand") != std::string::npos)
+                {
+                    gripper_joint_name = joint.name;
+                    break;
+                }
+            }
+
+            std::string gripper_type = get_hardware_parameter("gripper_type", "changingtek");
+            int read_frequency_divider = std::stoi(get_hardware_parameter("gripper_read_frequency_divider", "4"));
+
+            std::unordered_map<std::string, std::string> gripper_params;
+            gripper_params["read_frequency_divider"] = std::to_string(read_frequency_divider);
+
+            gripper_ = createGripper(gripper_type, gripper_joint_name, get_node()->get_logger(), gripper_params);
+            if (!gripper_)
+            {
+                RCLCPP_WARN(get_node()->get_logger(), "Failed to create gripper, continuing without gripper");
+                has_gripper_ = false;
+            }
+        }
 
         // 初始化力传感器数据（用于 hardware interface）
         ft_sensor_force_x_ = 0.0;
@@ -120,11 +151,12 @@ namespace dobot_ros2_control {
         RCLCPP_INFO(get_node()->get_logger(), "  Speed Factor: %d%%", speed_factor_);
         RCLCPP_INFO(get_node()->get_logger(), "  Verbose: %s", verbose_ ? "true" : "false");
         RCLCPP_INFO(get_node()->get_logger(), "  Arm Joints: %zu", joint_names_.size());
-        if (has_gripper_) {
-            RCLCPP_INFO(get_node()->get_logger(), "  Gripper: Yes (%s, read frequency divider: %d)",
-                        gripper_joint_name_.c_str(), gripper_read_frequency_divider_);
+        if (has_gripper_ && gripper_)
+        {
+            RCLCPP_INFO(get_node()->get_logger(), "  Gripper: Yes (%s)", gripper_->getJointName().c_str());
         }
-        if (has_ft_sensor_) {
+        if (has_ft_sensor_)
+        {
             RCLCPP_INFO(get_node()->get_logger(), "  FT Sensor: Yes");
         }
         RCLCPP_INFO(get_node()->get_logger(), "==============================================");
@@ -133,10 +165,12 @@ namespace dobot_ros2_control {
     }
 
     hardware_interface::CallbackReturn
-    DobotHardware::on_activate(const rclcpp_lifecycle::State & /* previous_state */) {
+    DobotHardware::on_activate(const rclcpp_lifecycle::State& /* previous_state */)
+    {
         RCLCPP_INFO(get_node()->get_logger(), "Activating DobotHardware...");
 
-        try {
+        try
+        {
             // 创建TCP连接到机器人（传递 verbose 参数）
             commander_ = std::make_shared<CRCommanderRos2>(robot_ip_, verbose_);
             commander_->init();
@@ -149,9 +183,11 @@ namespace dobot_ros2_control {
             auto start_time = std::chrono::steady_clock::now();
             const auto timeout = std::chrono::seconds(10);
 
-            while (!commander_->isConnected()) {
+            while (!commander_->isConnected())
+            {
                 auto current_time = std::chrono::steady_clock::now();
-                if (current_time - start_time > timeout) {
+                if (current_time - start_time > timeout)
+                {
                     RCLCPP_ERROR(get_node()->get_logger(), "Timeout waiting for TCP connection!");
                     return hardware_interface::CallbackReturn::ERROR;
                 }
@@ -163,33 +199,20 @@ namespace dobot_ros2_control {
 
             // 设置全局速度
             RCLCPP_INFO(get_node()->get_logger(), "Setting global speed factor to %d%%...", speed_factor_);
-            if (!commander_->setSpeedFactor(speed_factor_)) {
+            if (!commander_->setSpeedFactor(speed_factor_))
+            {
                 RCLCPP_ERROR(get_node()->get_logger(), "Failed to set speed factor!");
                 return hardware_interface::CallbackReturn::ERROR;
             }
 
-            // 如果配置了夹爪，初始化 Modbus
-            if (has_gripper_) {
-                if (!initializeModbus()) {
-                    RCLCPP_ERROR(get_node()->get_logger(), "Failed to initialize Modbus for gripper!");
+            // 如果配置了夹爪，初始化夹爪
+            if (has_gripper_ && gripper_)
+            {
+                if (!gripper_->initialize(commander_))
+                {
+                    RCLCPP_ERROR(get_node()->get_logger(), "Failed to initialize gripper!");
                     return hardware_interface::CallbackReturn::ERROR;
                 }
-
-                // 读取夹爪当前位置
-                double gripper_pos;
-                if (readGripperState(gripper_pos)) {
-                    gripper_position_ = gripper_pos;
-                    gripper_position_command_ = gripper_pos;
-                    last_gripper_command_ = gripper_pos;
-                    RCLCPP_INFO(get_node()->get_logger(), "Initial gripper position: %.3f", gripper_pos);
-                } else {
-                    RCLCPP_WARN(get_node()->get_logger(), "Failed to read initial gripper position, using 0.0");
-                    gripper_position_ = 0.0;
-                    gripper_position_command_ = 0.0;
-                    last_gripper_command_ = 0.0;
-                }
-
-                RCLCPP_INFO(get_node()->get_logger(), "✅ Gripper initialized (integrated control mode)");
             }
 
             // 读取当前关节位置并初始化命令（机械臂关节）
@@ -198,7 +221,8 @@ namespace dobot_ros2_control {
 
             // 无需锁：ros2_control 保证 read/write 顺序执行，无并发访问
             const size_t arm_joints = std::min(joint_names_.size(), static_cast<size_t>(6)); // 最多6个关节
-            for (size_t i = 0; i < arm_joints; ++i) {
+            for (size_t i = 0; i < arm_joints; ++i)
+            {
                 joint_positions_[i] = current_joints[i];
                 joint_position_commands_[i] = current_joints[i];
             }
@@ -207,7 +231,9 @@ namespace dobot_ros2_control {
                         "Initial %zu arm joint positions read from robot", arm_joints);
 
             RCLCPP_INFO(get_node()->get_logger(), "✅ DobotHardware activated and ready!");
-        } catch (const std::exception &e) {
+        }
+        catch (const std::exception& e)
+        {
             RCLCPP_ERROR(get_node()->get_logger(), "Failed to activate DobotHardware: %s", e.what());
             return hardware_interface::CallbackReturn::ERROR;
         }
@@ -216,7 +242,8 @@ namespace dobot_ros2_control {
     }
 
     hardware_interface::CallbackReturn DobotHardware::on_deactivate(
-        const rclcpp_lifecycle::State & /* previous_state */) {
+        const rclcpp_lifecycle::State& /* previous_state */)
+    {
         RCLCPP_INFO(get_node()->get_logger(), "Deactivating DobotHardware...");
 
         // 断开TCP连接
@@ -227,11 +254,13 @@ namespace dobot_ros2_control {
         return hardware_interface::CallbackReturn::SUCCESS;
     }
 
-    std::vector<hardware_interface::StateInterface::ConstSharedPtr> DobotHardware::on_export_state_interfaces() {
+    std::vector<hardware_interface::StateInterface::ConstSharedPtr> DobotHardware::on_export_state_interfaces()
+    {
         std::vector<hardware_interface::StateInterface::ConstSharedPtr> state_interfaces;
 
         // 为机械臂关节导出状态接口：位置、速度、力矩
-        for (size_t i = 0; i < joint_names_.size(); ++i) {
+        for (size_t i = 0; i < joint_names_.size(); ++i)
+        {
             state_interfaces.push_back(
                 std::make_shared<hardware_interface::StateInterface>(
                     joint_names_[i], hardware_interface::HW_IF_POSITION, &joint_positions_[i]));
@@ -246,22 +275,25 @@ namespace dobot_ros2_control {
         }
 
         // 如果配置了夹爪，导出夹爪状态接口（只有位置）
-        if (has_gripper_) {
+        if (has_gripper_ && gripper_)
+        {
             state_interfaces.push_back(
                 std::make_shared<hardware_interface::StateInterface>(
-                    gripper_joint_name_, hardware_interface::HW_IF_POSITION, &gripper_position_));
+                    gripper_->getJointName(), hardware_interface::HW_IF_POSITION, gripper_->getPositionPtr()));
         }
 
         // 导出六维力传感器状态接口
-        if (has_ft_sensor_) {
+        if (has_ft_sensor_)
+        {
             hardware_interface::ComponentInfo ft_sensor_info;
-            if (!findSensorByName("ft_sensor", ft_sensor_info)) {
+            if (!findSensorByName("ft_sensor", ft_sensor_info))
+            {
                 RCLCPP_WARN(get_node()->get_logger(),
                             "ft_sensor flag is true but sensor not found in configuration");
                 return state_interfaces;
             }
             // 创建接口名称到值的映射
-            std::map<std::string, double *> interface_map = {
+            std::map<std::string, double*> interface_map = {
                 {"force.x", &ft_sensor_force_x_},
                 {"force.y", &ft_sensor_force_y_},
                 {"force.z", &ft_sensor_force_z_},
@@ -271,14 +303,18 @@ namespace dobot_ros2_control {
             };
 
             // 按照配置中定义的顺序导出接口
-            for (size_t i = 0; i < ft_sensor_info.state_interfaces.size() && i < interface_map.size(); ++i) {
-                const std::string &interface_name = ft_sensor_info.state_interfaces[i].name;
+            for (size_t i = 0; i < ft_sensor_info.state_interfaces.size() && i < interface_map.size(); ++i)
+            {
+                const std::string& interface_name = ft_sensor_info.state_interfaces[i].name;
                 auto it = interface_map.find(interface_name);
-                if (it != interface_map.end()) {
+                if (it != interface_map.end())
+                {
                     state_interfaces.push_back(
                         std::make_shared<hardware_interface::StateInterface>(
                             ft_sensor_info.name, interface_name, it->second));
-                } else {
+                }
+                else
+                {
                     RCLCPP_WARN(get_node()->get_logger(),
                                 "Unknown ft_sensor interface: %s", interface_name.c_str());
                 }
@@ -297,26 +333,31 @@ namespace dobot_ros2_control {
         return state_interfaces;
     }
 
-    std::vector<hardware_interface::CommandInterface::SharedPtr> DobotHardware::on_export_command_interfaces() {
+    std::vector<hardware_interface::CommandInterface::SharedPtr> DobotHardware::on_export_command_interfaces()
+    {
         std::vector<hardware_interface::CommandInterface::SharedPtr> command_interfaces;
 
         // 为机械臂关节导出命令接口：位置命令
-        for (size_t i = 0; i < joint_names_.size(); ++i) {
+        for (size_t i = 0; i < joint_names_.size(); ++i)
+        {
             command_interfaces.push_back(
                 std::make_shared<hardware_interface::CommandInterface>(
                     joint_names_[i], hardware_interface::HW_IF_POSITION, &joint_position_commands_[i]));
         }
 
         // 如果配置了夹爪，导出夹爪命令接口
-        if (has_gripper_) {
+        if (has_gripper_ && gripper_)
+        {
             command_interfaces.push_back(
                 std::make_shared<hardware_interface::CommandInterface>(
-                    gripper_joint_name_, hardware_interface::HW_IF_POSITION, &gripper_position_command_));
+                    gripper_->getJointName(), hardware_interface::HW_IF_POSITION, gripper_->getPositionCommandPtr()));
 
             RCLCPP_INFO(get_node()->get_logger(),
                         "Exported %zu command interfaces (%zu arm joints + 1 gripper)",
                         command_interfaces.size(), joint_names_.size());
-        } else {
+        }
+        else
+        {
             RCLCPP_INFO(get_node()->get_logger(),
                         "Exported %zu command interfaces for %zu arm joints",
                         command_interfaces.size(), joint_names_.size());
@@ -326,27 +367,33 @@ namespace dobot_ros2_control {
     }
 
     hardware_interface::return_type DobotHardware::read(
-        const rclcpp::Time & /*time*/,
-        const rclcpp::Duration & /*period*/) {
-        if (!commander_ || !commander_->isConnected()) {
+        const rclcpp::Time& /*time*/,
+        const rclcpp::Duration& /*period*/)
+    {
+        if (!commander_ || !commander_->isConnected())
+        {
             return hardware_interface::return_type::ERROR;
         }
 
-        try {
+        try
+        {
             // 从TCP连接读取当前关节状态
             double current_joints[6];
             commander_->getCurrentJointStatus(current_joints);
 
             // 更新关节位置（无需锁：ros2_control 框架保证顺序执行）
             size_t arm_joints = std::min(joint_names_.size(), size_t(6)); // 最多6个关节
-            for (size_t i = 0; i < arm_joints; ++i) {
+            for (size_t i = 0; i < arm_joints; ++i)
+            {
                 joint_positions_[i] = current_joints[i];
             }
 
             // 获取实时数据（包含速度和力矩信息）
             auto real_time_data = commander_->getRealData();
-            if (real_time_data) {
-                for (size_t i = 0; i < arm_joints; ++i) {
+            if (real_time_data)
+            {
+                for (size_t i = 0; i < arm_joints; ++i)
+                {
                     joint_velocities_[i] = real_time_data->qd_actual[i] * M_PI / 180.0; // 转换为弧度/秒
                     joint_efforts_[i] = real_time_data->m_actual[i]; // 力矩
                 }
@@ -362,25 +409,12 @@ namespace dobot_ros2_control {
             }
 
             // 夹爪状态读取：定期读取（降低读取频率以减少Modbus负载）
-            if (has_gripper_) {
-                gripper_read_counter_++;
-                // 根据配置的频率除数读取夹爪状态（假设read频率为100Hz，则夹爪读取为100/N Hz）
-                if (gripper_read_counter_ >= gripper_read_frequency_divider_) {
-                    gripper_read_counter_ = 0;
-
-                    double gripper_pos;
-                    if (readGripperState(gripper_pos)) {
-                        gripper_position_ = gripper_pos;
-
-                        if (verbose_) {
-                            RCLCPP_DEBUG_THROTTLE(
-                                get_node()->get_logger(),
-                                *get_node()->get_clock(),
-                                1000,
-                                "Gripper position updated: %.3f", gripper_pos
-                            );
-                        }
-                    } else {
+            if (has_gripper_ && gripper_)
+            {
+                if (gripper_->shouldRead())
+                {
+                    if (!gripper_->readStatus())
+                    {
                         RCLCPP_ERROR_THROTTLE(
                             get_node()->get_logger(),
                             *get_node()->get_clock(),
@@ -388,11 +422,13 @@ namespace dobot_ros2_control {
                             "Failed to read gripper state"
                         );
                     }
+                    // readStatus 内部已经更新了 position_，无需额外处理
                 }
             }
 
             // 定期打印调试信息（仅 verbose 模式）
-            if (verbose_) {
+            if (verbose_)
+            {
                 // 只打印前几个关节的位置
                 RCLCPP_DEBUG_THROTTLE(
                     get_node()->get_logger(),
@@ -402,7 +438,9 @@ namespace dobot_ros2_control {
                     joint_names_.size()
                 );
             }
-        } catch (const std::exception &e) {
+        }
+        catch (const std::exception& e)
+        {
             RCLCPP_ERROR_THROTTLE(
                 get_node()->get_logger(),
                 *get_node()->get_clock(),
@@ -416,17 +454,21 @@ namespace dobot_ros2_control {
     }
 
     hardware_interface::return_type DobotHardware::write(
-        const rclcpp::Time & /*time*/,
-        const rclcpp::Duration & /*period*/) {
-        if (!commander_ || !commander_->isConnected()) {
+        const rclcpp::Time& /*time*/,
+        const rclcpp::Duration& /*period*/)
+    {
+        if (!commander_ || !commander_->isConnected())
+        {
             return hardware_interface::return_type::ERROR;
         }
 
-        try {
+        try
+        {
             // 获取关节命令（弧度）（无需锁：ros2_control 框架保证顺序执行）
             double joint_cmd[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
             size_t arm_joints = std::min(joint_names_.size(), static_cast<size_t>(6));
-            for (size_t i = 0; i < arm_joints; ++i) {
+            for (size_t i = 0; i < arm_joints; ++i)
+            {
                 joint_cmd[i] = joint_position_commands_[i];
             }
 
@@ -434,7 +476,8 @@ namespace dobot_ros2_control {
             // 注意：ServoJ 始终发送6个关节值，未配置的关节发送0
             bool success = commander_->servoJ(joint_cmd, servo_time_, aheadtime_, gain_);
 
-            if (!success) {
+            if (!success)
+            {
                 RCLCPP_ERROR_THROTTLE(
                     get_node()->get_logger(),
                     *get_node()->get_clock(),
@@ -445,37 +488,24 @@ namespace dobot_ros2_control {
             }
 
             // 夹爪控制：检测命令变化并发送
-            if (has_gripper_) {
-                double target = gripper_position_command_;
-
-                // 只在位置变化超过阈值时发送命令（避免频繁发送）
-                if (std::abs(target - last_gripper_command_) > 0.01) {
-                    if (controlGripper(target)) {
-                        last_gripper_command_ = target;
-
-                        if (verbose_) {
-                            RCLCPP_DEBUG(get_node()->get_logger(),
-                                         "Gripper command sent: %.3f", target);
-                        }
-                    } else {
-                        RCLCPP_ERROR_THROTTLE(
-                            get_node()->get_logger(),
-                            *get_node()->get_clock(),
-                            1000,
-                            "Failed to send gripper command"
-                        );
-                    }
-                }
+            // 注意：writeCommand 内部已经处理了命令变化检测和错误日志
+            if (has_gripper_ && gripper_)
+            {
+                double target = *gripper_->getPositionCommandPtr();
+                gripper_->writeCommand(target);
+                // writeCommand 内部会记录错误（如果有），这里不需要额外处理
             }
 
             // 统计写入频率（仅在 verbose 模式下显示）
-            if (verbose_) {
+            if (verbose_)
+            {
                 write_count_++;
                 auto current_time = std::chrono::steady_clock::now();
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     current_time - last_write_stat_time_).count();
 
-                if (elapsed >= 1000) {
+                if (elapsed >= 1000)
+                {
                     // 每1秒输出一次
                     double frequency = write_count_ * 1000.0 / elapsed;
                     RCLCPP_INFO(get_node()->get_logger(),
@@ -489,7 +519,8 @@ namespace dobot_ros2_control {
             }
 
             // 定期打印命令值（仅 verbose 模式）
-            if (verbose_) {
+            if (verbose_)
+            {
                 RCLCPP_DEBUG_THROTTLE(
                     get_node()->get_logger(),
                     *get_node()->get_clock(),
@@ -498,7 +529,9 @@ namespace dobot_ros2_control {
                     joint_names_.size()
                 );
             }
-        } catch (const std::exception &e) {
+        }
+        catch (const std::exception& e)
+        {
             RCLCPP_ERROR_THROTTLE(
                 get_node()->get_logger(),
                 *get_node()->get_clock(),
@@ -511,106 +544,42 @@ namespace dobot_ros2_control {
         return hardware_interface::return_type::OK;
     }
 
-    bool DobotHardware::initializeModbus() {
-        if (!commander_ || !commander_->isConnected()) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Cannot initialize Modbus: not connected");
-            return false;
+    std::unique_ptr<DobotGripperInterface> DobotHardware::createGripper(
+        const std::string& gripper_type,
+        const std::string& joint_name,
+        rclcpp::Logger logger,
+        const std::unordered_map<std::string, std::string>& params
+    )
+    {
+        std::unique_ptr<DobotGripperInterface> gripper;
+
+        if (gripper_type == "changingtek" || gripper_type == "changingtek90")
+        {
+            int read_frequency_divider = 4;
+            if (auto it = params.find("read_frequency_divider"); it != params.end())
+            {
+                read_frequency_divider = std::stoi(it->second);
+            }
+            gripper = std::make_unique<ChangingtekGripper>(joint_name, logger, get_node()->get_clock(),
+                                                           read_frequency_divider);
+            RCLCPP_INFO(logger, "Created Changingtek gripper: %s", joint_name.c_str());
+        }
+        else
+        {
+            RCLCPP_WARN(logger, "Unknown gripper type: %s, supported types: changingtek", gripper_type.c_str());
+            return nullptr;
         }
 
-        RCLCPP_INFO(get_node()->get_logger(), "Initializing Modbus for gripper control...");
-
-        // 步骤1: 关闭所有已存在的Modbus连接（0-4）
-        for (int i = 0; i < 5; i++) {
-            commander_->modbusClose(i);
-            // 不检查返回值，因为连接可能本来就不存在
-        }
-
-        // 步骤2: 创建新的Modbus RTU连接
-        // 参数：slave_id=1, baud=115200, parity='N', data_bit=8, stop_bit=1
-        if (!commander_->modbusRTUCreate(1, 115200, "N", 8, 1)) {
-            RCLCPP_ERROR(get_node()->get_logger(), "Failed to create Modbus RTU connection");
-            return false;
-        }
-
-        RCLCPP_INFO(get_node()->get_logger(), "✅ Modbus initialized successfully");
-        return true;
+        return gripper;
     }
 
-    bool DobotHardware::controlGripper(double position) {
-        // position: 0.0(闭合) - 1.0(打开)
-        // 转换为 degree: 0-99
-        int degree = static_cast<int>(position * 99.0);
-        if (degree < 0) degree = 0;
-        if (degree > 99) degree = 99;
-
-        // 计算 Modbus 值：9000(闭合) - 90(打开)
-        int modbus_value = static_cast<int>(9000 - degree * 9000.0 / 100.0);
-
-        // 发送三个Modbus寄存器写入命令（异步发送，不等待响应）
-        // 寄存器258: 控制模式 = 0
-        if (!commander_->setHoldRegs(0, 258, 1, "{0}", "U16")) {
-            return false;
-        }
-
-        // 寄存器259: 目标位置
-        char val_buf[32];
-        snprintf(val_buf, sizeof(val_buf), "{%d}", modbus_value);
-        if (!commander_->setHoldRegs(0, 259, 1, val_buf, "U16")) {
-            return false;
-        }
-
-        // 寄存器264: 执行命令 = 1
-        if (!commander_->setHoldRegs(0, 264, 1, "{1}", "U16")) {
-            return false;
-        }
-
-        return true;
-    }
-
-    bool DobotHardware::readGripperState(double &position) {
-        // 读取寄存器 0x60D (1549)，2个字节
-        std::string result;
-        if (!commander_->getHoldRegs(0, 0x60D, 2, "U16", result)) {
-            return false;
-        }
-
-        // 解析结果: "{val1,val2}"
-        // 去掉大括号
-        if (result.size() < 3) {
-            return false;
-        }
-
-        std::string data = result.substr(1, result.size() - 2); // 移除 { }
-
-        // 分割字符串
-        size_t comma_pos = data.find(',');
-        if (comma_pos == std::string::npos) {
-            return false;
-        }
-
-        try {
-            int val1 = std::stoi(data.substr(0, comma_pos));
-            int val2 = std::stoi(data.substr(comma_pos + 1));
-
-            // 计算位置：(9000 - ((val1 << 16) + val2)) / 9000 * 100
-            int modbus_pos = (val1 << 16) + val2;
-            double degree = (9000.0 - modbus_pos) / 9000.0 * 100.0;
-
-            // 转换为 0.0-1.0
-            position = degree / 99.0;
-            if (position < 0.0) position = 0.0;
-            if (position > 1.0) position = 1.0;
-
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    bool DobotHardware::findSensorByName(const std::string &sensor_name,
-                                         hardware_interface::ComponentInfo &sensor_info) {
-        for (const auto &sensor: info_.sensors) {
-            if (sensor.name.find(sensor_name) != std::string::npos) {
+    bool DobotHardware::findSensorByName(const std::string& sensor_name,
+                                         hardware_interface::ComponentInfo& sensor_info)
+    {
+        for (const auto& sensor : info_.sensors)
+        {
+            if (sensor.name.find(sensor_name) != std::string::npos)
+            {
                 sensor_info = sensor;
                 return true;
             }

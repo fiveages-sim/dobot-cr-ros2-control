@@ -17,6 +17,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
         sensor_msgs
         geometry_msgs
         realtime_tools
+        gripper_hardware_common
 )
 
 find_package(ament_cmake REQUIRED)
@@ -31,6 +32,7 @@ add_library(
         src/dobot_hardware.cpp
         src/command.cpp
         src/tcp_socket.cpp
+        src/grippers/changingtek_gripper.cpp
 )
 
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)

@@ -59,14 +59,14 @@ bool TcpClient::isConnect() const
     return is_connected_;
 }
 
-void TcpClient::tcpSend(const void *buf, uint32_t len)
+void TcpClient::tcpSend(const void* buf, uint32_t len)
 {
     if (!is_connected_)
         throw TcpClientException("tcp is disconnected");
 
     //std::cout << "send : " << buf << std::endl;
 
-    const auto *tmp = (const uint8_t *)buf;
+    const auto* tmp = (const uint8_t*)buf;
     while (len)
     {
         int err = (int)::send(fd_, tmp, len, MSG_NOSIGNAL);
@@ -80,9 +80,9 @@ void TcpClient::tcpSend(const void *buf, uint32_t len)
     }
 }
 
-bool TcpClient::tcpRecv(void *buf, uint32_t len, uint32_t &has_read, uint32_t timeout)
+bool TcpClient::tcpRecv(void* buf, uint32_t len, uint32_t& has_read, uint32_t timeout)
 {
-    uint8_t *tmp = static_cast<uint8_t*>(buf); // NOLINT(modernize-use-auto)
+    uint8_t* tmp = static_cast<uint8_t*>(buf); // NOLINT(modernize-use-auto)
     fd_set read_fds;
     timeval tv = {0, 0};
 
@@ -135,4 +135,3 @@ std::string TcpClient::toString()
 {
     return ip_ + ":" + std::to_string(port_);
 }
-
