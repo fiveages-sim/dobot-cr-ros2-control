@@ -17,7 +17,7 @@
 #include <cmath>
 
 using namespace gripper_hardware_common;
-using namespace ModbusConfig::Changingtek90;
+using ModbusCfg = ModbusConfig::Changingtek90C;
 
 namespace dobot_ros2_control
 {
@@ -116,13 +116,13 @@ namespace dobot_ros2_control
 
         // 读取寄存器 0x060D (1549)，2个寄存器
         std::string result;
-        if (!commander_->getHoldRegs(0, FEEDBACK_REG_ADDR, 2, "U16", result))
+        if (!commander_->getHoldRegs(0, ModbusCfg::FEEDBACK_REG_ADDR, 2, "U16", result))
         {
             RCLCPP_ERROR_THROTTLE(
                 logger_,
                 *clock_,
                 2000,
-                "Failed to read gripper feedback register (0x%04X)", FEEDBACK_REG_ADDR
+                "Failed to read gripper feedback register (0x%04X)", ModbusCfg::FEEDBACK_REG_ADDR
             );
             return false;
         }
@@ -211,13 +211,13 @@ namespace dobot_ros2_control
 
         // 发送三个Modbus寄存器写入命令（异步发送，不等待响应）
         // 寄存器258 (0x0102): 控制模式 = 0
-        if (!commander_->setHoldRegs(0, POS_REG_ADDR, 1, "{0}", "U16"))
+        if (!commander_->setHoldRegs(0, ModbusCfg::POS_REG_ADDR, 1, "{0}", "U16"))
         {
             RCLCPP_ERROR_THROTTLE(
                 logger_,
                 *clock_,
                 2000,
-                "Failed to write gripper control mode register (0x%04X)", POS_REG_ADDR
+                "Failed to write gripper control mode register (0x%04X)", ModbusCfg::POS_REG_ADDR
             );
             return false;
         }
@@ -225,25 +225,25 @@ namespace dobot_ros2_control
         // 寄存器259 (0x0103): 目标位置
         char val_buf[32];
         snprintf(val_buf, sizeof(val_buf), "{%u}", modbus_value);
-        if (!commander_->setHoldRegs(0, POS_REG_ADDR + 1, 1, val_buf, "U16"))
+        if (!commander_->setHoldRegs(0, ModbusCfg::POS_REG_ADDR + 1, 1, val_buf, "U16"))
         {
             RCLCPP_ERROR_THROTTLE(
                 logger_,
                 *clock_,
                 2000,
-                "Failed to write gripper position register (0x%04X)", POS_REG_ADDR + 1
+                "Failed to write gripper position register (0x%04X)", ModbusCfg::POS_REG_ADDR + 1
             );
             return false;
         }
 
         // 寄存器264 (0x0108): 执行命令 = 1
-        if (!commander_->setHoldRegs(0, TRIGGER_REG_ADDR, 1, "{1}", "U16"))
+        if (!commander_->setHoldRegs(0, ModbusCfg::TRIGGER_REG_ADDR, 1, "{1}", "U16"))
         {
             RCLCPP_ERROR_THROTTLE(
                 logger_,
                 *clock_,
                 2000,
-                "Failed to write gripper trigger register (0x%04X)", TRIGGER_REG_ADDR
+                "Failed to write gripper trigger register (0x%04X)", ModbusCfg::TRIGGER_REG_ADDR
             );
             return false;
         }
